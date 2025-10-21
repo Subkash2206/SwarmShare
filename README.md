@@ -24,10 +24,6 @@ This project is more than a simple file transfer script; it's a complete protoco
 
 The system uses a hybrid P2P topology. The tracker maintains the state of the network (which peers have which file chunks), while the peers form a mesh for the actual data transfer.
 
-*(**To create this diagram:** Use a free tool like [Diagrams.net](https://app.diagrams.net/). Create a simple flowchart showing the Tracker in the middle and several Peers around it. Use arrows to show `share`/`get` requests to the tracker and `chunk request`/`chunk data` transfers between peers.)*
-
-![Architecture Diagram Placeholder](https://placehold.co/800x300/2d3748/e2e8f0?text=Your+Architecture+Diagram+Here)
-
 ---
 
 ##  Setup & Usage
