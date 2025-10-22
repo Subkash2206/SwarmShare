@@ -1,4 +1,4 @@
-# peer.py (Phase 4.6: Final Fix)
+# peer.py (Phase 4.7: QoL + Final Fixes)
 import socket
 import threading
 import json
@@ -8,15 +8,28 @@ import hashlib
 import time
 import shutil
 from queue import Queue
+from tqdm import tqdm  # Import tqdm for progress bars
 
-# --- Configuration & Utilities (NO CHANGES HERE) ---
+# --- Configuration & Utilities ---
 TRACKER_ADDR = ('127.0.0.1', 8888)
 if len(sys.argv) < 2:
     print("Usage: python peer.py <port>")
     sys.exit(1)
 PEER_SERVER_PORT = int(sys.argv[1])
 SHARED_FOLDER = 'shared'
-CHUNK_SIZE = 1024 * 1024
+CHUNK_SIZE = 1024 * 1024  # 1 MB chunks
+
+
+# --- ANSI Color Codes ---
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
 
 
 def get_file_chunks(filepath):
@@ -35,12 +48,12 @@ def read_chunk(filepath, chunk_index):
         return f.read(CHUNK_SIZE)
 
 
-# --- Peer Server (NO CHANGES HERE) ---
+# --- Peer Server ---
 def peer_server_logic():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind(('', PEER_SERVER_PORT))
     server_socket.listen(5)
-    print(f"[*] Peer server listening on port {PEER_SERVER_PORT}")
+    print(f"{Colors.BLUE}[*] Peer server listening on port {PEER_SERVER_PORT}{Colors.ENDC}")
     while True:
         client_socket, addr = server_socket.accept()
         threading.Thread(target=handle_upload, args=(client_socket,)).start()
@@ -55,12 +68,12 @@ def handle_upload(conn):
             chunk_data = read_chunk(filepath, request["chunk_index"])
             conn.sendall(chunk_data)
     except Exception as e:
-        print(f"Error during upload: {e}")
+        print(f"{Colors.FAIL}Error during upload: {e}{Colors.ENDC}")
     finally:
         conn.close()
 
 
-# --- Peer Client (NO CHANGES HERE) ---
+# --- Peer Client ---
 def talk_to_tracker(payload):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect(TRACKER_ADDR)
@@ -71,16 +84,16 @@ def talk_to_tracker(payload):
         return json.loads(response_data.decode())
 
 
-### --- FIXED DownloadManager --- ###
+### --- DownloadManager (Bug Fixes + QoL) --- ###
 class DownloadManager:
-    # We now pass our own address to prevent self-downloading
+    # Pass our own address to prevent self-downloading
     def __init__(self, filename, file_info, my_address):
         self.filename = filename
         self.filesize = file_info["filesize"]
         self.chunk_hashes = file_info["chunks"]
         self.peers = file_info["peers"]
         self.num_chunks = len(self.chunk_hashes)
-        self.my_address = my_address  ### NEW ### Store our own address
+        self.my_address = my_address  # Store our own address
 
         self.temp_dir = os.path.join(SHARED_FOLDER, f"{self.filename}.tmp")
         self.progress_file = os.path.join(self.temp_dir, "progress.json")
@@ -93,16 +106,26 @@ class DownloadManager:
                 self.chunks_to_download.put(i)
         self.lock = threading.Lock()
 
+        # --- TQDM Progress Bar Initialization ---
+        self.pbar = tqdm(
+            total=self.num_chunks,
+            desc=f"{Colors.CYAN}Downloading {filename}{Colors.ENDC}",
+            initial=len(self.downloaded_chunk_indices),
+            unit="chunk",
+            ncols=100,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
+        )
+
     def load_progress(self):
         if os.path.exists(self.progress_file):
             try:
                 with open(self.progress_file, 'r') as f:
                     progress = json.load(f)
                     if progress.get("chunk_hashes") == self.chunk_hashes:
-                        print(f"[*] Resuming download for '{self.filename}'.")
+                        print(f"{Colors.GREEN}[*] Resuming download for '{self.filename}'.{Colors.ENDC}")
                         return set(progress.get("downloaded_indices", []))
             except (IOError, json.JSONDecodeError):
-                print("Could not read progress file. Starting fresh.")
+                print(f"{Colors.WARNING}Could not read progress file. Starting fresh.{Colors.ENDC}")
         initial_progress = {"filesize": self.filesize, "chunk_hashes": self.chunk_hashes, "downloaded_indices": []}
         with open(self.progress_file, 'w') as f:
             json.dump(initial_progress, f)
@@ -125,7 +148,7 @@ class DownloadManager:
 
             peer_address = self.find_peer_for_chunk(chunk_index)
             if not peer_address:
-                time.sleep(1)  # Wait a moment for peers to update
+                time.sleep(1)
                 continue
 
             chunk_data = self.download_chunk_from_peer(peer_address, chunk_index)
@@ -138,19 +161,20 @@ class DownloadManager:
                 with self.lock:
                     self.downloaded_chunk_indices.add(chunk_index)
                     self.save_progress()
-                    progress_percentage = (len(self.downloaded_chunk_indices) / self.num_chunks) * 100
-                    print(f"Downloaded chunk {chunk_index + 1}/{self.num_chunks}. Progress: {progress_percentage:.2f}%")
+                    # --- Update TQDM Progress Bar ---
+                    self.pbar.update(1)
 
                 talk_to_tracker({"command": "update", "filename": self.filename, "chunk_index": chunk_index})
             else:
-                ### FIX ### Don't re-queue a failed chunk, just let the worker move on.
-                # This prevents the infinite loop. The download will be marked as incomplete
-                # and can be retried by the user later.
-                print(f"Chunk {chunk_index} download failed from peer {peer_address}.")
+                # Use pbar.write to print without messing up the bar
+                self.pbar.write(
+                    f"{Colors.WARNING}Chunk {chunk_index} download failed from peer {peer_address}. Not re-queueing.{Colors.ENDC}")
+                # We do not re-queue the chunk, per your fix.
 
     def find_peer_for_chunk(self, chunk_index):
+        # This function includes your bug fix
         for peer, chunks in self.peers.items():
-            ### FIX ### Don't try to download from yourself!
+            # Don't try to download from yourself!
             if peer == self.my_address:
                 continue
             if chunk_index in chunks:
@@ -158,7 +182,7 @@ class DownloadManager:
         return None
 
     def download_chunk_from_peer(self, peer_address, chunk_index):
-        # This function is unchanged
+        # This function includes your bug fix for the last chunk size
         host, port_str = peer_address.split(':')
         port = int(port_str)
         try:
@@ -170,7 +194,7 @@ class DownloadManager:
 
                 data = b""
                 s.settimeout(10)
-                # This logic is complex to handle the last chunk being smaller
+                # Correctly calculate expected size, even for the last chunk
                 expected_size = CHUNK_SIZE if chunk_index < self.num_chunks - 1 else self.filesize % CHUNK_SIZE or CHUNK_SIZE
                 while len(data) < expected_size:
                     packet = s.recv(expected_size - len(data))
@@ -179,17 +203,22 @@ class DownloadManager:
                     data += packet
                 return data
         except (socket.timeout, ConnectionRefusedError, OSError) as e:
-            # print(f"Error connecting to peer {peer_address}: {e}") # This can be noisy
+            if hasattr(self, 'pbar'):
+                self.pbar.write(f"{Colors.FAIL}Error connecting to peer {peer_address}: {e}{Colors.ENDC}")
+            else:
+                print(f"{Colors.FAIL}Error connecting to peer {peer_address}: {e}{Colors.ENDC}")
             return None
 
     def start(self):
-        # This function is unchanged
         print(
-            f"[*] Starting download for '{self.filename}'. {len(self.downloaded_chunk_indices)} of {self.num_chunks} chunks already downloaded.")
+            f"{Colors.BLUE}[*] Starting download for '{self.filename}'. {len(self.downloaded_chunk_indices)} of {self.num_chunks} chunks already downloaded.{Colors.ENDC}")
         threads = []
         num_workers = min(10, self.chunks_to_download.qsize())
-        if num_workers == 0 and len(self.downloaded_chunk_indices) < self.num_chunks:
-            print("No chunks to download, but file is incomplete. Are peers available?")
+
+        if self.chunks_to_download.qsize() == 0 and len(self.downloaded_chunk_indices) < self.num_chunks:
+            print(
+                f"{Colors.WARNING}Download incomplete, but no peers found for remaining chunks. Run again to retry.{Colors.ENDC}")
+            self.pbar.close()  # Close the bar if we're not starting workers
             return
 
         for _ in range(num_workers):
@@ -200,34 +229,39 @@ class DownloadManager:
         for t in threads:
             t.join()
 
+        # --- Close TQDM Progress Bar ---
+        self.pbar.close()
+
         if len(self.downloaded_chunk_indices) == self.num_chunks:
             self.assemble_file()
         else:
             print(
-                f"\nDownload did not complete. {len(self.downloaded_chunk_indices)}/{self.num_chunks} chunks downloaded. Run again to resume.")
+                f"\n{Colors.WARNING}Download did not complete. {len(self.downloaded_chunk_indices)}/{self.num_chunks} chunks downloaded. Run again to resume.{Colors.ENDC}")
 
     def assemble_file(self):
-        # This function is unchanged
-        print("[*] Assembling final file...")
+        print(f"\n{Colors.BLUE}[*] Assembling final file...{Colors.ENDC}")
         output_path = os.path.join(SHARED_FOLDER, self.filename)
         try:
             with open(output_path, 'wb') as final_file:
-                for i in range(self.num_chunks):
+                # --- Add TQDM for assembly ---
+                for i in tqdm(range(self.num_chunks), desc=f"{Colors.GREEN}Assembling{Colors.ENDC}", unit="chunk",
+                              ncols=100):
                     chunk_path = os.path.join(self.temp_dir, f"chunk_{i}")
                     with open(chunk_path, 'rb') as chunk_file:
                         final_file.write(chunk_file.read())
 
-            print(f"[*] File assembly complete! Saved as {output_path}")
+            print(f"{Colors.GREEN}[*] File assembly complete! Saved as {output_path}{Colors.ENDC}")
 
             final_hashes = get_file_chunks(output_path)
             if final_hashes == self.chunk_hashes:
-                print("✅ Final file integrity check PASSED.")
+                print(f"{Colors.GREEN}{Colors.BOLD}✅ Final file integrity check PASSED.{Colors.ENDC}")
                 shutil.rmtree(self.temp_dir)
-                print("[*] Temporary files cleaned up.")
+                print(f"{Colors.GREEN}[*] Temporary files cleaned up.{Colors.ENDC}")
             else:
-                print("❌ Final file integrity check FAILED. File may be corrupt.")
+                print(
+                    f"{Colors.FAIL}{Colors.BOLD}❌ Final file integrity check FAILED. File may be corrupt.{Colors.ENDC}")
         except IOError as e:
-            print(f"Error assembling file: {e}")
+            print(f"{Colors.FAIL}Error assembling file: {e}{Colors.ENDC}")
 
 
 ### --- MODIFIED main() function --- ###
@@ -239,6 +273,7 @@ def main():
     server_thread.start()
 
     try:
+        print(f"{Colors.BLUE}Registering local files with tracker...{Colors.ENDC}")
         files_to_share = [f for f in os.listdir(SHARED_FOLDER) if os.path.isfile(os.path.join(SHARED_FOLDER, f))]
         for filename in files_to_share:
             filepath = os.path.join(SHARED_FOLDER, filename)
@@ -247,28 +282,37 @@ def main():
             payload = {"command": "share", "filename": filename, "filesize": filesize, "chunks": chunks}
             talk_to_tracker(payload)
     except ConnectionRefusedError:
-        print("[ERROR] Could not connect to the tracker. Is it running?")
+        print(f"{Colors.FAIL}{Colors.BOLD}[ERROR] Could not connect to the tracker. Is it running?{Colors.ENDC}")
         sys.exit(1)
 
     while True:
-        print("\n--- P2P File Sharing Client (Fixed) ---")
+        print(f"\n{Colors.HEADER}{Colors.BOLD}--- SwarmShare P2P Client ---{Colors.ENDC}")
         print("1. Download a file")
         print("2. Exit")
-        choice = input("> ")
+        choice = input(f"{Colors.BOLD}> {Colors.ENDC}")
 
         if choice == "1":
-            filename = input("Enter filename to download: ")
-            file_info = talk_to_tracker({"command": "get", "filename": filename})
-            if file_info.get("error"):
-                print(f"Error from tracker: {file_info['error']}")
-                continue
+            filename = input(f"{Colors.BOLD}Enter filename to download: {Colors.ENDC}")
+            try:
+                file_info = talk_to_tracker({"command": "get", "filename": filename})
+                if file_info.get("error"):
+                    print(f"{Colors.FAIL}Error from tracker: {file_info['error']}{Colors.ENDC}")
+                    continue
 
-            ### FIX ### Pass our own address to the manager
-            my_address = f"{socket.gethostbyname(socket.gethostname())}:{PEER_SERVER_PORT}"
-            manager = DownloadManager(filename, file_info, my_address)
-            manager.start()
+                print(f"{Colors.GREEN}Found file. Peers: {list(file_info['peers'].keys())}{Colors.ENDC}")
+
+                # Pass our own address to the manager (per your fix)
+                my_address = f"{socket.gethostbyname(socket.gethostname())}:{PEER_SERVER_PORT}"
+                manager = DownloadManager(filename, file_info, my_address)
+                manager.start()
+            except Exception as e:
+                print(f"{Colors.FAIL}An error occurred: {e}{Colors.ENDC}")
+
         elif choice == "2":
+            print(f"{Colors.BLUE}Shutting down...{Colors.ENDC}")
             break
+        else:
+            print(f"{Colors.WARNING}Invalid choice. Please try again.{Colors.ENDC}")
 
 
 if __name__ == "__main__":
