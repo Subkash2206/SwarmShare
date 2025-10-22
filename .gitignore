@@ -13,3 +13,4 @@ shared/received_*
 
     # Project-specific generated files
     shared/received_*
+*.sh

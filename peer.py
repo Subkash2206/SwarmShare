@@ -1,4 +1,4 @@
-# peer.py (Phase 4.7: QoL + Final Fixes)
+# peer.py (Phase 4.8: ALL FIXES MERGED)
 import socket
 import threading
 import json
@@ -73,14 +73,33 @@ def handle_upload(conn):
         conn.close()
 
 
-# --- Peer Client ---
+# --- Peer Client (MODIFIED FOR LARGE MESSAGES) ---
 def talk_to_tracker(payload):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect(TRACKER_ADDR)
         my_address = f"{socket.gethostbyname(socket.gethostname())}:{PEER_SERVER_PORT}"
         payload["address"] = my_address
         s.sendall(json.dumps(payload).encode())
-        response_data = s.recv(4096)
+
+        # --- NEW RECEIVE LOOP ---
+        # This loop will continue to receive data until the
+        # tracker closes the connection, guaranteeing we get the
+        # entire message, no matter how large.
+        response_chunks = []
+        while True:
+            chunk = s.recv(4096)  # Read in standard 4KB chunks
+            if not chunk:
+                # The tracker has closed the connection, message is complete.
+                break
+            response_chunks.append(chunk)
+
+        response_data = b''.join(response_chunks)
+        # --- END NEW RECEIVE LOOP ---
+
+        # Handle empty response edge case
+        if not response_data:
+            return {"error": "No response from tracker"}
+
         return json.loads(response_data.decode())
 
 
@@ -148,7 +167,7 @@ class DownloadManager:
 
             peer_address = self.find_peer_for_chunk(chunk_index)
             if not peer_address:
-                time.sleep(1)
+                time.sleep(1)  # Wait a moment for peers to update
                 continue
 
             chunk_data = self.download_chunk_from_peer(peer_address, chunk_index)
@@ -210,6 +229,7 @@ class DownloadManager:
             return None
 
     def start(self):
+        # This function is now present
         print(
             f"{Colors.BLUE}[*] Starting download for '{self.filename}'. {len(self.downloaded_chunk_indices)} of {self.num_chunks} chunks already downloaded.{Colors.ENDC}")
         threads = []
@@ -239,6 +259,7 @@ class DownloadManager:
                 f"\n{Colors.WARNING}Download did not complete. {len(self.downloaded_chunk_indices)}/{self.num_chunks} chunks downloaded. Run again to resume.{Colors.ENDC}")
 
     def assemble_file(self):
+        # This function is now present
         print(f"\n{Colors.BLUE}[*] Assembling final file...{Colors.ENDC}")
         output_path = os.path.join(SHARED_FOLDER, self.filename)
         try:
@@ -284,6 +305,12 @@ def main():
     except ConnectionRefusedError:
         print(f"{Colors.FAIL}{Colors.BOLD}[ERROR] Could not connect to the tracker. Is it running?{Colors.ENDC}")
         sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"{Colors.FAIL}{Colors.BOLD}[ERROR] Tracker sent bad data. Is tracker.py up to date?{Colors.ENDC}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"{Colors.FAIL}An error occurred while talking to tracker: {e}{Colors.ENDC}")
+        sys.exit(1)
 
     while True:
         print(f"\n{Colors.HEADER}{Colors.BOLD}--- SwarmShare P2P Client ---{Colors.ENDC}")
@@ -304,7 +331,10 @@ def main():
                 # Pass our own address to the manager (per your fix)
                 my_address = f"{socket.gethostbyname(socket.gethostname())}:{PEER_SERVER_PORT}"
                 manager = DownloadManager(filename, file_info, my_address)
-                manager.start()
+                manager.start()  # This will now work
+            except json.JSONDecodeError:
+                print(
+                    f"{Colors.FAIL}{Colors.BOLD}[ERROR] Received bad data from tracker. Is tracker.py up to date?{Colors.ENDC}")
             except Exception as e:
                 print(f"{Colors.FAIL}An error occurred: {e}{Colors.ENDC}")
 
